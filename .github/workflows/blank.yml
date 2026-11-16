@@ -1,0 +1,589 @@
+name: Build Android APK
+on: [push, workflow_dispatch]
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Generate Full 5-Tab ElevenStudio Project and Build APK
+        run: |
+          mkdir -p app/src/main/java/io/elevenlabs/clone app/src/main/assets
+
+          cat << 'EOF' > settings.gradle
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "ElevenStudio"
+          include ':app'
+          EOF
+
+          cat << 'EOF' > build.gradle
+          plugins { id 'com.android.application' version '8.5.0' apply false }
+          EOF
+
+          cat << 'EOF' > app/build.gradle
+          plugins { id 'com.android.application' }
+          android {
+              namespace 'io.elevenlabs.clone'
+              compileSdk 34
+              defaultConfig {
+                  applicationId "io.elevenlabs.clone"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 2
+                  versionName "2.0"
+              }
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <application
+                  android:label="ElevenStudio AI"
+                  android:usesCleartextTraffic="true"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:configChanges="orientation|screenSize|keyboardHidden"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat << 'EOF' > app/src/main/java/io/elevenlabs/clone/MainActivity.java
+          package io.elevenlabs.clone;
+
+          import android.annotation.SuppressLint;
+          import android.app.Activity;
+          import android.media.MediaPlayer;
+          import android.os.Bundle;
+          import android.speech.tts.TextToSpeech;
+          import android.view.Window;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.Toast;
+          import java.io.File;
+          import java.io.FileOutputStream;
+          import java.io.InputStream;
+          import java.io.OutputStream;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
+          import java.nio.charset.StandardCharsets;
+          import java.util.Locale;
+
+          public class MainActivity extends Activity implements TextToSpeech.OnInitListener {
+              private WebView webView;
+              private TextToSpeech tts;
+              private MediaPlayer mediaPlayer;
+
+              @SuppressLint("SetJavaScriptEnabled")
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  requestWindowFeature(Window.FEATURE_NO_TITLE);
+                  tts = new TextToSpeech(this, this);
+
+                  webView = new WebView(this);
+                  WebSettings s = webView.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setMediaPlaybackRequiresUserGesture(false);
+                  s.setAllowFileAccess(true);
+
+                  webView.setWebChromeClient(new WebChromeClient());
+                  webView.setWebViewClient(new WebViewClient());
+                  webView.addJavascriptInterface(new AndroidBridge(), "AndroidBridge");
+                  webView.loadUrl("file:///android_asset/index.html");
+                  setContentView(webView);
+              }
+
+              public class AndroidBridge {
+                  @JavascriptInterface
+                  public void speakOffline(String text, float pitch, float rate, String accent) {
+                      if (tts == null) return;
+                      if (accent != null && accent.toLowerCase().contains("indian")) {
+                          tts.setLanguage(new Locale("en", "IN"));
+                      } else if (accent != null && accent.toLowerCase().contains("british")) {
+                          tts.setLanguage(Locale.UK);
+                      } else {
+                          tts.setLanguage(Locale.US);
+                      }
+                      tts.setPitch(Math.max(0.5f, Math.min(2.0f, pitch)));
+                      tts.setSpeechRate(Math.max(0.5f, Math.min(2.0f, rate)));
+                      tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "utt_" + System.currentTimeMillis());
+                  }
+
+                  @JavascriptInterface
+                  public void speakElevenApi(String apiKey, String voiceId, String modelId, String text, float stab, float sim, float style, float fallbackPitch, float fallbackRate, String accent) {
+                      new Thread(() -> {
+                          try {
+                              URL url = new URL("https://api.elevenlabs.io/v1/text-to-speech/" + voiceId);
+                              HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                              conn.setRequestMethod("POST");
+                              conn.setRequestProperty("xi-api-key", apiKey.trim());
+                              conn.setRequestProperty("Content-Type", "application/json");
+                              conn.setRequestProperty("Accept", "audio/mpeg");
+                              conn.setDoOutput(true);
+                              String safeText = text.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", " ");
+                              String json = "{\"text\":\"" + safeText + "\",\"model_id\":\"" + modelId + "\",\"voice_settings\":{\"stability\":" + stab + ",\"similarity_boost\":" + sim + ",\"style\":" + style + ",\"use_speaker_boost\":true}}";
+                              try (OutputStream os = conn.getOutputStream()) {
+                                  os.write(json.getBytes(StandardCharsets.UTF_8));
+                              }
+                              if (conn.getResponseCode() == 200) {
+                                  File out = new File(getCacheDir(), "eleven_out.mp3");
+                                  try (InputStream is = conn.getInputStream(); FileOutputStream fos = new FileOutputStream(out)) {
+                                      byte[] buf = new byte[4096];
+                                      int n;
+                                      while ((n = is.read(buf)) != -1) fos.write(buf, 0, n);
+                                  }
+                                  runOnUiThread(() -> {
+                                      stopAll();
+                                      try {
+                                          mediaPlayer = new MediaPlayer();
+                                          mediaPlayer.setDataSource(out.getAbsolutePath());
+                                          mediaPlayer.prepare();
+                                          mediaPlayer.start();
+                                          Toast.makeText(MainActivity.this, "Playing ElevenLabs Cloud Audio", Toast.LENGTH_SHORT).show();
+                                      } catch (Exception e) {
+                                          speakOffline(text, fallbackPitch, fallbackRate, accent);
+                                      }
+                                  });
+                              } else {
+                                  runOnUiThread(() -> speakOffline(text, fallbackPitch, fallbackRate, accent));
+                              }
+                          } catch (Exception e) {
+                              runOnUiThread(() -> speakOffline(text, fallbackPitch, fallbackRate, accent));
+                          }
+                      }).start();
+                  }
+
+                  @JavascriptInterface
+                  public void stopAll() {
+                      if (tts != null) tts.stop();
+                      if (mediaPlayer != null) {
+                          try { mediaPlayer.stop(); mediaPlayer.release(); } catch (Exception ignored) {}
+                          mediaPlayer = null;
+                      }
+                  }
+              }
+
+              @Override
+              public void onInit(int status) {
+                  if (status == TextToSpeech.SUCCESS && tts != null) tts.setLanguage(Locale.US);
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (webView != null && webView.canGoBack()) webView.goBack();
+                  else super.onBackPressed();
+              }
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/assets/index.html
+          <!DOCTYPE html>
+          <html>
+          <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+          <style>
+            * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, Roboto, sans-serif; }
+            body { background: #09090b; color: #f4f4f5; padding-bottom: 130px; }
+            .topbar { background: #121217; padding: 14px 16px; border-bottom: 1px solid #27272a; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 10; }
+            .brand { display: flex; align-items: center; gap: 10px; }
+            .logo { width: 30px; height: 30px; border-radius: 8px; background: #fff; color: #000; font-weight: 900; display: flex; align-items: center; justify-content: center; }
+            .title { font-size: 15px; font-weight: 700; }
+            .sub { font-size: 11px; color: #a1a1aa; }
+            .badge { background: #1e1b4b; color: #a5b4fc; border: 1px solid #4338ca; padding: 4px 8px; border-radius: 8px; font-size: 11px; font-family: monospace; }
+            .container { padding: 14px; }
+            .card { background: #141419; border: 1px solid #27272a; border-radius: 16px; padding: 14px; margin-bottom: 12px; }
+            .label { font-size: 11px; color: #a1a1aa; text-transform: uppercase; font-weight: 700; margin-bottom: 6px; display: block; }
+            select, input[type=text], input[type=password], textarea { width: 100%; background: #09090b; color: #fff; border: 1px solid #2e2e36; border-radius: 10px; padding: 10px; font-size: 13px; margin-bottom: 8px; }
+            textarea { min-height: 110px; resize: none; line-height: 1.45; }
+            .chips { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 6px; margin-bottom: 8px; }
+            .chip { background: #1e1b4b; color: #c7d2fe; border: 1px solid #3730a3; border-radius: 99px; padding: 5px 10px; font-size: 11px; white-space: nowrap; }
+            .chip-gray { background: #27272a; color: #e4e4e7; border: 1px solid #3f3f46; }
+            .slider-row { margin-bottom: 10px; }
+            .slider-head { display: flex; justify-content: space-between; font-size: 12px; color: #d4d4d8; margin-bottom: 4px; }
+            input[type=range] { width: 100%; accent-color: #6366f1; }
+            .btn { width: 100%; background: linear-gradient(90deg, #4f46e5, #7c3aed); color: #fff; border: none; padding: 13px; border-radius: 14px; font-size: 14px; font-weight: 700; }
+            .btn-sec { background: #27272a; color: #fff; border: 1px solid #3f3f46; padding: 8px 12px; border-radius: 10px; font-size: 12px; font-weight: 600; }
+            .voice-item { display: flex; justify-content: space-between; align-items: center; padding: 12px; background: #18181f; border: 1px solid #27272a; border-radius: 14px; margin-bottom: 8px; }
+            .voice-item.active { border-color: #6366f1; }
+            .miniplayer { position: fixed; bottom: 58px; left: 8px; right: 8px; background: #181824; border: 1px solid #3f3f52; border-radius: 14px; padding: 10px 14px; display: flex; justify-content: space-between; align-items: center; z-index: 20; }
+            .navbar { position: fixed; bottom: 0; left: 0; right: 0; height: 56px; background: #0c0c10; border-top: 1px solid #27272a; display: grid; grid-template-columns: repeat(5, 1fr); z-index: 20; }
+            .navbtn { background: none; border: none; color: #71717a; font-size: 10px; font-weight: 600; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; }
+            .navbtn.active { color: #818cf8; }
+            .hidden { display: none; }
+            .sent { padding: 10px; border-radius: 10px; margin-bottom: 6px; color: #d4d4d8; font-size: 14px; line-height: 1.5; }
+            .sent.active { background: #1e1b4b; border: 1px solid #6366f1; color: #fff; font-weight: 600; }
+          </style>
+          </head>
+          <body>
+            <div class="topbar">
+              <div class="brand">
+                <div class="logo">II</div>
+                <div>
+                  <div class="title" id="topTitle">Text to Speech Studio</div>
+                  <div class="sub" id="topSub">Eleven v4 • 90+ languages • Audio tags</div>
+                </div>
+              </div>
+              <span class="badge" id="modelBadge">eleven_v4</span>
+            </div>
+
+            <div class="container">
+              <!-- TAB 1: STUDIO -->
+              <div id="tab-studio">
+                <div class="card">
+                  <span class="label">Active Voice & Model</span>
+                  <select id="voiceSelect" onchange="syncVoiceFromDropdown(this.value)"></select>
+                  <select id="modelSelect" onchange="changeModel(this.value)">
+                    <option value="eleven_v4">Eleven v4 (90+ langs, 10k chars, Emotion Tags)</option>
+                    <option value="eleven_v4_turbo">Eleven v4 Turbo (~100ms latency, 90+ langs)</option>
+                    <option value="eleven_v3">Eleven v3 (70+ langs, 5k chars, Dramatic)</option>
+                    <option value="eleven_multilingual_v2">Eleven Multilingual v2 (29 langs, 10k chars)</option>
+                    <option value="eleven_flash_v2_5">Eleven Flash v2.5 (~100ms, 40k chars)</option>
+                  </select>
+                </div>
+
+                <div class="card">
+                  <span class="label">Direct Delivery & Emotion Tags (Tap to Insert)</span>
+                  <div class="chips">
+                    <button class="chip" onclick="addTag('[whispering] ')">[whispering]</button>
+                    <button class="chip" onclick="addTag('[excited] ')">[excited]</button>
+                    <button class="chip" onclick="addTag('[warmly] ')">[warmly]</button>
+                    <button class="chip" onclick="addTag('[dramatic pause] ')">[dramatic pause]</button>
+                    <button class="chip" onclick="addTag('[laughs] ')">[laughs]</button>
+                  </div>
+                  <div class="chips">
+                    <button class="chip chip-gray" onclick="setPreset(0)">Sci-Fi Trailer</button>
+                    <button class="chip chip-gray" onclick="setPreset(1)">Podcast Intro</button>
+                    <button class="chip chip-gray" onclick="setPreset(2)">English + Hindi</button>
+                  </div>
+                  <textarea id="scriptBox">[warmly] Welcome to ElevenStudio on Android. [dramatic pause] With Eleven v4, you can direct nuanced intonation, pacing, and emotion across over ninety languages.</textarea>
+                </div>
+
+                <div class="card">
+                  <span class="label">Voice Parameters & Acoustic Controls</span>
+                  <div class="slider-row">
+                    <div class="slider-head"><span>Stability</span><span id="lblStab">50%</span></div>
+                    <input type="range" id="rngStab" min="0" max="100" value="50" oninput="document.getElementById('lblStab').innerText=this.value+'%'">
+                  </div>
+                  <div class="slider-row">
+                    <div class="slider-head"><span>Similarity Boost</span><span id="lblSim">75%</span></div>
+                    <input type="range" id="rngSim" min="0" max="100" value="75" oninput="document.getElementById('lblSim').innerText=this.value+'%'">
+                  </div>
+                  <div class="slider-row">
+                    <div class="slider-head"><span>Style Exaggeration</span><span id="lblStyle">20%</span></div>
+                    <input type="range" id="rngStyle" min="0" max="100" value="20" oninput="document.getElementById('lblStyle').innerText=this.value+'%'">
+                  </div>
+                  <div class="slider-row">
+                    <div class="slider-head"><span>Delivery Speed</span><span id="lblSpd">1.00x</span></div>
+                    <input type="range" id="rngSpd" min="70" max="130" value="100" oninput="document.getElementById('lblSpd').innerText=(this.value/100).toFixed(2)+'x'">
+                  </div>
+                </div>
+
+                <button class="btn" onclick="generateTTS()">✨ Generate Lifelike Speech</button>
+              </div>
+
+              <!-- TAB 2: VOICES -->
+              <div id="tab-voices" class="hidden">
+                <div class="card">
+                  <input type="text" id="voiceSearch" placeholder="Search voices by name, accent, or ID..." oninput="renderVoices()">
+                  <div class="chips">
+                    <button class="chip" onclick="filterCat('all')">All Voices</button>
+                    <button class="chip chip-gray" onclick="filterCat('indian')">Indian Accents</button>
+                    <button class="chip chip-gray" onclick="filterCat('cloned')">My Clones</button>
+                    <button class="chip chip-gray" onclick="filterCat('saved')">★ Saved</button>
+                  </div>
+                </div>
+                <div id="voiceList"></div>
+              </div>
+
+              <!-- TAB 3: VOICE LAB -->
+              <div id="tab-lab" class="hidden">
+                <div class="card">
+                  <span class="label">1. Instant Voice Cloning (IVC — POST /v1/voices/add)</span>
+                  <input type="text" id="cloneName" placeholder="Custom Voice Name (e.g., Vishal Studio Clone)">
+                  <select id="cloneAccent">
+                    <option value="Indian English">Indian English</option>
+                    <option value="Hindi / Multilingual">Hindi / Multilingual</option>
+                    <option value="British">British English</option>
+                    <option value="American">American English</option>
+                  </select>
+                  <select id="clonePitch">
+                    <option value="0.90">Deep Resonant Baritone</option>
+                    <option value="1.00">Natural Balanced Mid</option>
+                    <option value="1.12">Crisp Energetic Tenor</option>
+                  </select>
+                  <button class="btn" onclick="createClone()">🧬 Create Instant Voice Clone</button>
+                </div>
+
+                <div class="card">
+                  <span class="label">2. Voice Changer (Speech-to-Speech)</span>
+                  <select id="stsClip">
+                    <option value="We only have one shot at crossing the firewall tonight.">Whispered Movie Monologue</option>
+                    <option value="What a magnificent cover drive right through the gap for four!">Excited Cricket Commentary</option>
+                    <option value="Building great software starts with obsessing over user flow.">Calm Podcast Reflection</option>
+                  </select>
+                  <button class="btn-sec" style="width:100%" onclick="runVoiceChanger()">🔄 Transform Performance into Active Voice</button>
+                </div>
+
+                <div class="card">
+                  <span class="label">3. AI Voice Isolator (POST /v1/audio-isolation)</span>
+                  <div class="slider-row">
+                    <div class="slider-head"><span>Noise Suppression</span><span>94%</span></div>
+                    <input type="range" min="20" max="100" value="94">
+                  </div>
+                  <button class="btn-sec" style="width:100%" onclick="speakNow('Testing studio voice isolation in a busy Bengaluru cafe—background noise stripped cleanly.', 1.0, 1.0, 'Indian English', 'Voice Isolator')">✨ Isolate & Play Clean Vocal</button>
+                </div>
+              </div>
+
+              <!-- TAB 4: READER -->
+              <div id="tab-reader" class="hidden">
+                <div class="card">
+                  <span class="label">ElevenReader — Tap Any Sentence to Read Aloud</span>
+                  <div id="readerList"></div>
+                  <input type="text" id="customReadInput" placeholder="Paste custom paragraph to import into Reader...">
+                  <button class="btn-sec" style="width:100%" onclick="importReader()">Import Custom Text</button>
+                </div>
+              </div>
+
+              <!-- TAB 5: HISTORY & API KEY -->
+              <div id="tab-history" class="hidden">
+                <div class="card">
+                  <span class="label">Live ElevenLabs API Key (Optional — xi-api-key)</span>
+                  <input type="password" id="apiKeyBox" placeholder="Paste xi-api-key for cloud synthesis (or leave blank for offline TTS)">
+                  <button class="btn-sec" style="width:100%" onclick="saveKey()">Save API Key</button>
+                </div>
+                <div class="card">
+                  <span class="label">Generated Audio History</span>
+                  <div id="historyList"></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- MINI PLAYER -->
+            <div class="miniplayer">
+              <div>
+                <div style="font-size:12px;font-weight:700" id="playerTitle">Ready — George (Eleven v4)</div>
+                <div style="font-size:10px;color:#a5b4fc" id="playerSub">Tap Play to preview</div>
+              </div>
+              <div style="display:flex;gap:6px">
+                <button class="btn-sec" onclick="replayLast()">▶ Play</button>
+                <button class="btn-sec" onclick="stopSpeech()">⏹</button>
+              </div>
+            </div>
+
+            <!-- BOTTOM NAV -->
+            <div class="navbar">
+              <button class="navbtn active" id="nav-studio" onclick="showTab('studio')"><span>🎙️</span><span>Studio</span></button>
+              <button class="navbtn" id="nav-voices" onclick="showTab('voices')"><span>🌐</span><span>Voices</span></button>
+              <button class="navbtn" id="nav-lab" onclick="showTab('lab')"><span>🧬</span><span>Voice Lab</span></button>
+              <button class="navbtn" id="nav-reader" onclick="showTab('reader')"><span>📖</span><span>Reader</span></button>
+              <button class="navbtn" id="nav-history" onclick="showTab('history')"><span>🗂️</span><span>History/API</span></button>
+            </div>
+
+          <script>
+            var voices = [
+              { id: 'JBFqnCBsd6RMkjVDRZzb', name: 'George', role: 'Warm Narrator', accent: 'British', cat: 'narration', pitch: 0.92, saved: true, cloned: false, sample: 'Every great story deserves a voice with warmth and presence.' },
+              { id: 'pNInz6obpgDQGcFmaJgB', name: 'Aarav', role: 'Bengaluru Tech & Documentary', accent: 'Indian English', cat: 'indian', pitch: 0.96, saved: true, cloned: false, sample: 'Namaste! Welcome to ElevenStudio running natively on your Android phone.' },
+              { id: 'EXAVITQu4vr4xnSDxMaL', name: 'Kavya', role: 'Expressive Bilingual Host', accent: 'Indian English & Hindi', cat: 'indian', pitch: 1.14, saved: false, cloned: false, sample: 'Whether it is a late-night podcast or a bilingual story, every emotion comes through.' },
+              { id: '21m00Tcm4TlvDq8ikWAM', name: 'Rachel', role: 'Calm Conversational AI', accent: 'American', cat: 'conversational', pitch: 1.08, saved: false, cloned: false, sample: 'Hi there! I am tuned for natural conversational agents and audiobooks.' },
+              { id: 'VR6AewLTigWG4xSOukaG', name: 'Marcus', role: 'Cinematic Trailer & Gaming', accent: 'American Deep', cat: 'narration', pitch: 0.82, saved: false, cloned: false, sample: 'In a world where silence was the only law, one voice changed everything.' }
+            ];
+            var presets = [
+              '[whispering] Beyond the outer orbital ring, no signal had returned in forty years. [dramatic pause] Then the receiver lit up with a human voice.',
+              '[excited] Welcome back to Deep Tech Weekly! Today we are testing Eleven v4 right from Android.',
+              '[warmly] Namaste friends! Aaj hum dekhenge ki ElevenStudio Android app se aap kitni aasani se lifelike voiceovers record kar sakte hain.'
+            ];
+            var readerLines = [
+              'Neural speech synthesis has evolved far beyond robotic syllable stitching.',
+              'Modern context-aware models like Eleven v4 analyze surrounding sentences to infer emotional intent and natural emphasis.',
+              'With Instant Voice Cloning, creators can capture their vocal timbre in under a minute across over ninety languages.',
+              'Tap any sentence in ElevenReader to jump directly to that line with synchronized narration.'
+            ];
+            var curVoiceId = voices[0].id;
+            var curModelId = 'eleven_v4';
+            var curCat = 'all';
+            var apiKey = '';
+            var lastSpoken = 'Welcome to ElevenStudio on Android.';
+            var historyItems = [];
+
+            function getVoice() {
+              for (var i=0; i<voices.length; i++) if (voices[i].id === curVoiceId) return voices[i];
+              return voices[0];
+            }
+            function syncDropdown() {
+              var sel = document.getElementById('voiceSelect');
+              var html = '';
+              for (var i=0; i<voices.length; i++) {
+                var v = voices[i];
+                html += '<option value="'+v.id+'" '+(v.id===curVoiceId?'selected':'')+'>'+v.name+' ('+v.accent+' • '+v.role+')</option>';
+              }
+              sel.innerHTML = html;
+            }
+            function syncVoiceFromDropdown(id) { curVoiceId = id; renderVoices(); }
+            function changeModel(m) { curModelId = m; document.getElementById('modelBadge').innerText = m; }
+            function addTag(t) { var b = document.getElementById('scriptBox'); b.value += ' ' + t; }
+            function setPreset(idx) { document.getElementById('scriptBox').value = presets[idx]; }
+
+            function speakNow(rawText, pitch, rate, accent, label) {
+              var clean = rawText.replace(/\[[^\]]+\]/g, '').trim();
+              if (!clean) return;
+              lastSpoken = clean;
+              var p = pitch || 1.0;
+              var r = rate || 1.0;
+              if (rawText.indexOf('[whispering]') !== -1) { p *= 0.88; r *= 0.88; }
+              if (rawText.indexOf('[excited]') !== -1) { p *= 1.12; r *= 1.12; }
+              document.getElementById('playerTitle').innerText = label + ' • ' + clean.slice(0, 28) + '...';
+              document.getElementById('playerSub').innerText = apiKey ? 'Streaming ElevenLabs Cloud API' : 'Playing via Android Neural TTS';
+
+              var stab = Number(document.getElementById('rngStab').value) / 100;
+              var sim = Number(document.getElementById('rngSim').value) / 100;
+              var sty = Number(document.getElementById('rngStyle').value) / 100;
+
+              if (window.AndroidBridge) {
+                if (apiKey && apiKey.length > 5) {
+                  window.AndroidBridge.speakElevenApi(apiKey, curVoiceId, curModelId, clean, stab, sim, sty, p, r, accent);
+                } else {
+                  window.AndroidBridge.speakOffline(clean, p, r, accent);
+                }
+              }
+            }
+
+            function generateTTS() {
+              var txt = document.getElementById('scriptBox').value;
+              var v = getVoice();
+              var spd = Number(document.getElementById('rngSpd').value) / 100;
+              speakNow(txt, v.pitch, spd, v.accent, v.name);
+              historyItems.unshift({ voice: v.name, model: curModelId, text: txt, pitch: v.pitch, spd: spd, accent: v.accent });
+              renderHistory();
+            }
+
+            function replayLast() {
+              var v = getVoice();
+              speakNow(lastSpoken, v.pitch, 1.0, v.accent, v.name);
+            }
+            function stopSpeech() { if (window.AndroidBridge) window.AndroidBridge.stopAll(); }
+
+            function filterCat(c) { curCat = c; renderVoices(); }
+            function renderVoices() {
+              var q = (document.getElementById('voiceSearch').value || '').toLowerCase();
+              var html = '';
+              for (var i=0; i<voices.length; i++) {
+                var v = voices[i];
+                if (curCat === 'saved' && !v.saved) continue;
+                if (curCat === 'cloned' && !v.cloned) continue;
+                if (curCat === 'indian' && v.cat !== 'indian') continue;
+                if (q && (v.name+' '+v.accent+' '+v.role).toLowerCase().indexOf(q) === -1) continue;
+                html += '<div class="voice-item '+(v.id===curVoiceId?'active':'')+'">' +
+                  '<div><div style="font-size:13px;font-weight:700">'+v.name+' <span style="font-size:10px;color:#a5b4fc">('+v.accent+')</span></div>' +
+                  '<div style="font-size:11px;color:#a1a1aa">'+v.role+' • ID: '+v.id.slice(0,10)+'</div></div>' +
+                  '<div style="display:flex;gap:6px">' +
+                    '<button class="btn-sec" onclick="speakNow(\''+v.sample+'\','+v.pitch+',1.0,\''+v.accent+'\',\''+v.name+'\')">▶</button>' +
+                    '<button class="btn-sec" onclick="curVoiceId=\''+v.id+'\';syncDropdown();renderVoices();showTab(\'studio\')">Use</button>' +
+                  '</div></div>';
+              }
+              document.getElementById('voiceList').innerHTML = html;
+            }
+
+            function createClone() {
+              var name = document.getElementById('cloneName').value.trim() || 'Vishal Custom Clone';
+              var acc = document.getElementById('cloneAccent').value;
+              var p = parseFloat(document.getElementById('clonePitch').value) || 0.95;
+              var newId = 'ivc_' + Math.floor(Math.random()*900000 + 100000);
+              voices.unshift({ id: newId, name: name, role: 'Instant Voice Clone (IVC)', accent: acc, cat: 'indian', pitch: p, saved: true, cloned: true, sample: 'Hello! This is ' + name + ', your custom Instant Voice Clone.' });
+              curVoiceId = newId;
+              document.getElementById('cloneName').value = '';
+              syncDropdown();
+              renderVoices();
+              showTab('studio');
+              speakNow('Instant Voice Clone ' + name + ' created and selected.', p, 1.0, acc, name);
+            }
+
+            function runVoiceChanger() {
+              var clip = document.getElementById('stsClip').value;
+              var v = getVoice();
+              speakNow(clip, v.pitch, 1.0, v.accent, 'STS -> ' + v.name);
+            }
+
+            function renderReader(activeIdx) {
+              var html = '';
+              for (var i=0; i<readerLines.length; i++) {
+                html += '<div class="sent '+(i===activeIdx?'active':'')+'" onclick="readSentence('+i+')">' + readerLines[i] + '</div>';
+              }
+              document.getElementById('readerList').innerHTML = html;
+            }
+            function readSentence(idx) {
+              renderReader(idx);
+              var v = getVoice();
+              speakNow(readerLines[idx], v.pitch, 1.0, v.accent, 'Reader');
+            }
+            function importReader() {
+              var val = document.getElementById('customReadInput').value.trim();
+              if (!val) return;
+              readerLines = val.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [val];
+              document.getElementById('customReadInput').value = '';
+              renderReader(0);
+              readSentence(0);
+            }
+
+            function saveKey() {
+              apiKey = document.getElementById('apiKeyBox').value.trim();
+              document.getElementById('playerSub').innerText = apiKey ? 'Connected to ElevenLabs Cloud API' : 'Using Android Neural TTS';
+            }
+
+            function renderHistory() {
+              var html = '';
+              for (var i=0; i<historyItems.length; i++) {
+                var h = historyItems[i];
+                html += '<div class="voice-item"><div><div style="font-size:12px;font-weight:700">'+h.voice+' ('+h.model+')</div><div style="font-size:11px;color:#a1a1aa">'+h.text.slice(0,40)+'...</div></div>' +
+                  '<button class="btn-sec" onclick="speakNow(\''+h.text.replace(/'/g,"")+'\','+h.pitch+','+h.spd+',\''+h.accent+'\',\''+h.voice+'\')">▶</button></div>';
+              }
+              document.getElementById('historyList').innerHTML = html || '<div style="font-size:12px;color:#71717a">Generate speech in Studio to see clips here.</div>';
+            }
+
+            function showTab(t) {
+              var tabs = ['studio','voices','lab','reader','history'];
+              for (var i=0; i<tabs.length; i++) {
+                document.getElementById('tab-'+tabs[i]).className = (tabs[i]===t ? '' : 'hidden');
+                document.getElementById('nav-'+tabs[i]).className = 'navbtn ' + (tabs[i]===t ? 'active' : '');
+              }
+            }
+
+            syncDropdown();
+            renderVoices();
+            renderReader(-1);
+            renderHistory();
+          </script>
+          </body>
+          </html>
+          EOF
+
+          gradle assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ElevenStudio-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
