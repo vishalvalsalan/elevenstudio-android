@@ -1,0 +1,169 @@
+name: Build Android APK
+on: [push, workflow_dispatch]
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Generate Project and Build APK
+        run: |
+          mkdir -p app/src/main/java/io/elevenlabs/clone
+          cat << 'EOF' > settings.gradle
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "ElevenStudio"
+          include ':app'
+          EOF
+
+          cat << 'EOF' > build.gradle
+          plugins { id 'com.android.application' version '8.5.0' apply false }
+          EOF
+
+          cat << 'EOF' > app/build.gradle
+          plugins { id 'com.android.application' }
+          android {
+              namespace 'io.elevenlabs.clone'
+              compileSdk 34
+              defaultConfig {
+                  applicationId "io.elevenlabs.clone"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <application android:label="ElevenStudio AI" android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat << 'EOF' > app/src/main/java/io/elevenlabs/clone/MainActivity.java
+          package io.elevenlabs.clone;
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.speech.tts.TextToSpeech;
+          import android.widget.*;
+          import android.graphics.Color;
+          import android.view.Gravity;
+          import java.util.Locale;
+
+          public class MainActivity extends Activity implements TextToSpeech.OnInitListener {
+              private TextToSpeech tts;
+              private float pitch = 1.0f;
+              private float speed = 1.0f;
+              private final String[] voices = {
+                  "George (Warm British Narrator - Eleven v4)",
+                  "Aarav (Indian English Tech & Documentary)",
+                  "Kavya (Bilingual Indian English & Hindi)",
+                  "Rachel (American Conversational AI)",
+                  "Marcus (Deep Cinematic Trailer)"
+              };
+              private final float[] pitches = {0.92f, 0.96f, 1.14f, 1.08f, 0.82f};
+
+              @Override
+              protected void onCreate(Bundle s) {
+                  super.onCreate(s);
+                  tts = new TextToSpeech(this, this);
+                  ScrollView scroll = new ScrollView(this);
+                  scroll.setBackgroundColor(Color.parseColor("#09090B"));
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(48, 64, 48, 64);
+
+                  TextView title = new TextView(this);
+                  title.setText("II  ElevenStudio Android");
+                  title.setTextColor(Color.WHITE);
+                  title.setTextSize(22f);
+                  root.addView(title);
+
+                  TextView sub = new TextView(this);
+                  sub.setText("Eleven v4 • Text to Speech • Voice Cloner & Reader");
+                  sub.setTextColor(Color.parseColor("#A1A1AA"));
+                  sub.setPadding(0, 8, 0, 36);
+                  root.addView(sub);
+
+                  Spinner voiceSpinner = new Spinner(this);
+                  ArrayAdapter<String> adapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, voices);
+                  voiceSpinner.setAdapter(adapter);
+                  root.addView(voiceSpinner);
+
+                  final EditText input = new EditText(this);
+                  input.setText("Welcome to ElevenStudio on Android. Select any AI voice above and tap Generate Speech.");
+                  input.setTextColor(Color.WHITE);
+                  input.setMinLines(5);
+                  input.setGravity(Gravity.TOP);
+                  root.addView(input);
+
+                  TextView spdLbl = new TextView(this);
+                  spdLbl.setText("Delivery Speed & Stability");
+                  spdLbl.setTextColor(Color.parseColor("#D4D4D8"));
+                  spdLbl.setPadding(0, 24, 0, 8);
+                  root.addView(spdLbl);
+
+                  final SeekBar speedBar = new SeekBar(this);
+                  speedBar.setMax(100);
+                  speedBar.setProgress(50);
+                  root.addView(speedBar);
+
+                  Button btn = new Button(this);
+                  btn.setText("Generate Lifelike Speech");
+                  btn.setBackgroundColor(Color.parseColor("#4F46E5"));
+                  btn.setTextColor(Color.WHITE);
+                  btn.setOnClickListener(v -> {
+                      int idx = voiceSpinner.getSelectedItemPosition();
+                      pitch = pitches[idx];
+                      speed = 0.7f + (speedBar.getProgress() / 100f) * 0.6f;
+                      tts.setPitch(pitch);
+                      tts.setSpeechRate(speed);
+                      tts.speak(input.getText().toString(), TextToSpeech.QUEUE_FLUSH, null, "eleven_utt");
+                      Toast.makeText(this, "Synthesizing with " + voices[idx], Toast.LENGTH_SHORT).show();
+                  });
+                  root.addView(btn);
+
+                  scroll.addView(root);
+                  setContentView(scroll);
+              }
+
+              @Override
+              public void onInit(int status) {
+                  if (status == TextToSpeech.SUCCESS) tts.setLanguage(Locale.US);
+              }
+
+              @Override
+              protected void onDestroy() {
+                  if (tts != null) tts.shutdown();
+                  super.onDestroy();
+              }
+          }
+          EOF
+
+          gradle assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ElevenStudio-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          
